@@ -6,7 +6,7 @@ using QuantumLattices: matrix, OperatorSum, Operators, CompositeIndex, Index, Op
 using ..EDCore: Sector, EDKind
 using ..CanonicalFockSystems: BinaryBases, ⊗
 
-export Block, Partition, BlockVals, EDSolver, BlockGreenFunction, ClusterGreenFunction
+export Block, partition, BlockVals, EDSolver, blockGreenFunction, finiteGreenFunction
 
 """
     Block{N<:Integer, T<:AbstractVector, R<:AbstractVector, P<:AbstractVector, S<:Sector}
@@ -48,11 +48,11 @@ function Block(spindwups::AbstractVector, block::AbstractVector, iops::AbstractV
 end
 
 """
-    Partition{S<:Symbol, B<:Block, L<:AbstractVector{B}, R<:Sector}
-    Partition(::Val{:N}, table::Table, bs::BinaryBases)
-    Partition(::Val{:S}, table::Table, bs::BinaryBases)
-    Partition(::Val{:A}, table::Table, bs::BinaryBases)
-    Partition(::Val{:F}, table::Table, bs::BinaryBases)
+    partition{S<:Symbol, B<:Block, L<:AbstractVector{B}, R<:Sector}
+    partition(::Val{:N}, table::Table, bs::BinaryBases)
+    partition(::Val{:S}, table::Table, bs::BinaryBases)
+    partition(::Val{:A}, table::Table, bs::BinaryBases)
+    partition(::Val{:F}, table::Table, bs::BinaryBases)
 
 Divide cluster green function into different blocks according to the different terms contained in the Hamiltonian.
     The Hamiltonian of the system has:
@@ -61,30 +61,25 @@ Divide cluster green function into different blocks according to the different t
     (3) anomalous terms -> :A
     (4) all the above -> :F
 """
-struct Partition{S<:Symbol, B<:Block, L<:AbstractVector{B}, R<:Sector}
-    symbol::S
-    lesser::L
-    greater::L
-    sector::R
-end
-Partition(sym::Symbol, table::Table, bs::BinaryBases) = Partition(Val(sym), table, bs)
-function Partition(::Val{:N}, table::Table, bs::BinaryBases)
+
+partition(sym::Symbol, table::Table, bs::BinaryBases) = partition(Val(sym), table, bs)
+function partition(::Val{:N}, table::Table, bs::BinaryBases)
     seqs = [(seq..., i) for seq in sort(collect(keys(table)), by = x -> table[x]), i in 1:2]
     id₁, id₂ = seqs[:,1], seqs[:,2]
     ops₁, ops₂ = [[Operators(1*CompositeIndex(Index(key[2], FID{:f}(key[3], key[1], key[4])), [0.0, 0.0], [0.0, 0.0])) for key in id] for id in [id₁, id₂]]
     arrs = [Vector(1:length(id₁))[(i-1)*(length(Vector(1:length(id₁)))÷(length(bs.stategroups)))+1:i*(length(Vector(1:length(id₁)))÷(length(bs.stategroups)))] for i in 1:length(bs.stategroups)]
     lesser, greater = [Block([arr, arr], ops₁[arr], ops₁[arr], bs) for arr in arrs], [Block([arr, arr], ops₂[arr],ops₂[arr], bs) for arr in arrs]
-    return Partition(:N, lesser, greater, bs)
+    return lesser, greater
 end
-function Partition(::Val{:S}, table::Table, bs::BinaryBases)
+function partition(::Val{:S}, table::Table, bs::BinaryBases)
     seqs = [(seq..., i) for seq in sort(collect(keys(table)), by = x -> table[x]), i in 1:2]
     id₁, id₂ = seqs[:,1], seqs[:,2]
     ops₁, ops₂ = [[Operators(1*CompositeIndex(Index(key[2], FID{:f}(key[3], key[1], key[4])), [0.0, 0.0], [0.0, 0.0])) for key in id] for id in [id₁, id₂]]
     arr = Vector(1:length(id₁))
     lesser, greater = [Block([arr,arr], ops₁[arr], ops₁[arr], bs)], [Block([arr,arr], ops₂[arr], ops₂[arr], bs)]
-    return Partition(:S, lesser, greater, bs)
+    return lesser, greater
 end
-function Partition(::Val{:A}, table::Table, bs::BinaryBases)
+function partition(::Val{:A}, table::Table, bs::BinaryBases)
     seqs = [(seq..., i) for seq in sort(collect(keys(table)), by = x -> table[x]), i in 1:2]
     id₁, id₂ = [seqs[:,1]...,seqs[:,2]...], [seqs[:,2]...,seqs[:,1]...]
     ops₁, ops₂ = [[Operators(1*CompositeIndex(Index(key[2], FID{:f}(key[3], key[1], key[4])), [0.0, 0.0], [0.0, 0.0])) for key in id] for id in [id₁, id₂]]
@@ -93,15 +88,15 @@ function Partition(::Val{:A}, table::Table, bs::BinaryBases)
     brrs = vcat(arrs[1:div(length(arrs), 2)], reverse(arrs[1:div(length(arrs), 2)]))
     lesser = [Block(arrs[1:div(length(arrs), 2)], [brrs[i], arrs[i]], ops₁[brrs[i]], ops₁[arrs[i]], bs) for i in eachindex(arrs)]
     greater = [Block(arrs[1:div(length(arrs), 2)], [arrs[i], brrs[i]], ops₂[brrs[i]], ops₂[arrs[i]], bs) for i in eachindex(arrs)]
-    return Partition(:A, lesser, greater, bs)
+    return lesser, greater
 end
-function Partition(::Val{:F}, table::Table, bs::BinaryBases)
+function partition(::Val{:F}, table::Table, bs::BinaryBases)
     seqs = [(seq..., i) for seq in sort(collect(keys(table)), by = x -> table[x]), i in 1:2]
     id₁, id₂ = [seqs[:,1]...,seqs[:,2]...], [seqs[:,2]...,seqs[:,1]...]
     ops₁, ops₂ = [[Operators(1*CompositeIndex(Index(key[2], FID{:f}(key[3], key[1], key[4])), [0.0, 0.0], [0.0, 0.0])) for key in id] for id in [id₁, id₂]]
     arr, brr = 1:(length(id₁)÷2), (length(id₁)÷2+1):length(id₁)
     lesser, greater = [Block([arr,arr], ops₁[arr], ops₁[arr], bs), Block([arr,brr], ops₁[arr], ops₁[brr], bs)], [Block([arr,arr], ops₂[arr], ops₂[arr], bs), Block([brr,arr], ops₂[arr], ops₂[brr], bs)]
-    return Partition(:F, lesser, greater, bs)
+    return lesser, greater
 end
 
 """
@@ -168,31 +163,27 @@ struct EDSolver{R<:Real, B<:BlockVals, S<:AbstractVector{B}, I<:Integer}
     gse::R
     lvals::S
     gvals::S
-    lens::I
 end
-
+Base.length(eds::EDSolver) = maximum([maximum([maximum([maximum([maximum(arr) for arr in block]) for block in val.block]) for val in vals]) for vals in [eds.lvals, eds.gvals]])
 """
     EDSolver(::EDKind{:FED}, sym::Symbol, refergenerator::OperatorGenerator, bs::BinaryBases, table::Table; m::Int=200)
 
 Construct the exact diagonalization solver of a certain system.
 """
-function EDSolver(::EDKind{:FED}, parts::Partition, refergenerator::OperatorGenerator, bs::BinaryBases, table::Table; m::Int=200)
-    rops = expand(refergenerator)
-    Hₘ = matrix(rops, (bs, bs), table)
-    vals, vecs, _  = KrylovKit.eigsolve(Hₘ, 1, :SR, Float64)
-    gse, gs = real(vals[1]), vecs[1]
-    lesser, greater = parts.lesser, parts.greater
+function EDSolver(sym::Symbol, ed::ED, ; m::Int=200)
+    eig = eigen(ed)
+    gse, gs, bs = eig.values[1], eig.vectors[1], eig.sectors[1]
+    lesser, greater = partition(sym, table, bs)
     lvals, gvals = [BlockVals(bl, gs, rops, bs, table; m=m) for bl in lesser], [BlockVals(bg, gs, rops, bs, table; m=m) for bg in greater]
-    lens = maximum([maximum([maximum([maximum([maximum(arr) for arr in block]) for block in val.block]) for val in vals]) for vals in [lvals, gvals]])
-    return EDSolver(gse, lvals, gvals, lens)
+    return EDSolver(gse, lvals, gvals)
 end
 
 """
-    BlockGreenFunction(gse::Real, blockvals::BlockVals, ω::Complex)
+    blockGreenFunction(gse::Real, blockvals::BlockVals, ω::Complex)
 
 Calculate a block of cluster green function.
 """
-function BlockGreenFunction(gse::Real, blockvals::BlockVals, ω::Complex)
+function blockGreenFunction(gse::Real, blockvals::BlockVals, ω::Complex)
     (avs, bvs, cvs),  norms, proj = blockvals.abc, blockvals.norms, blockvals.projects
     bgfm, d = zeros(ComplexF64, length(norms), length(norms)), [1.0;zeros(length(avs[1])-1)]
     blockvals.nambu==1 ? bv=[(ω - gse) .+ bvs[i] for i in 1:length(norms)] : bv=[(ω + gse) .- bvs[i] for i in 1:length(norms)]
@@ -219,54 +210,56 @@ function thomas(a::AbstractVector, b::AbstractVector, c::AbstractVector, d::Abst
 end
 
 """
-    ClusterGreenFunction(normal::Bool, kind::Symbol, solver::EDSolver, ω::Complex)
-    ClusterNormalGreenFunction(kind::Symbol, solver::EDSolver, ω::Complex)
-    ClusterGorkovGreenFunction(kind::Symbol, solver::EDSolver, ω::Complex)
+    finiteGreenFunction(normal::Bool, kind::Symbol, solver::EDSolver, ω::Complex)
+    finiteNormalGreenFunction(kind::Symbol, solver::EDSolver, ω::Complex)
+    finiteGorkovGreenFunction(kind::Symbol, solver::EDSolver, ω::Complex)
 
 Calculate the cluster green function with certain frequence ω
 """
-function ClusterGreenFunction(normal::Bool, kind::Symbol, solver::EDSolver, ω::Complex)
-    (normal||length(solver.lvals)==1) ? cgf=ClusterNormalGreenFunction(kind::Symbol, solver::EDSolver, ω::Complex) : cgf=ClusterGorkovGreenFunction(kind::Symbol, solver::EDSolver, ω::Complex)
+function finiteGreenFunction(normal::Bool, kind::Symbol, solver::EDSolver, ω::Complex)
+    (normal||length(solver.lvals)==1) ? cgf=finiteNormalGreenFunction(kind::Symbol, solver::EDSolver, ω::Complex) : cgf=finiteGorkovGreenFunction(kind::Symbol, solver::EDSolver, ω::Complex)
     return cgf
 end
-function ClusterNormalGreenFunction(kind::Symbol, solver::EDSolver, ω::Complex)
-    clm, cgm = zeros(ComplexF64, solver.lens, solver.lens), zeros(ComplexF64, solver.lens, solver.lens)
+function finiteNormalGreenFunction(kind::Symbol, solver::EDSolver, ω::Complex)
+    lens = length(solver)
+    clm, cgm = zeros(ComplexF64, lens, lens), zeros(ComplexF64, lens, lens)
     for lval in solver.lvals
-        clm[lval.block...] = BlockGreenFunction(solver.gse, lval, ω)
+        clm[lval.block...] = blockGreenFunction(solver.gse, lval, ω)
     end
     for gval in solver.gvals
-        cgm[gval.block...] = transpose(BlockGreenFunction(solver.gse, gval, ω))
+        cgm[gval.block...] = transpose(blockGreenFunction(solver.gse, gval, ω))
     end
-    kind==:f ? cgf=clm+cgm : (kind==:b ? cgf=cgm-clm : cgf=zeros(ComplexF64, solver.lens, solver.lens))
+    kind==:f ? cgf=clm+cgm : (kind==:b ? cgf=cgm-clm : cgf=zeros(ComplexF64, lens, lens))
     return cgf
 end
-function ClusterGorkovGreenFunction(kind::Symbol, solver::EDSolver, ω::Complex)
-    clm, cgm = zeros(ComplexF64, solver.lens, solver.lens), zeros(ComplexF64, solver.lens, solver.lens)
+function finiteGorkovGreenFunction(kind::Symbol, solver::EDSolver, ω::Complex)
+    lens = length(solver)
+    clm, cgm = zeros(ComplexF64, lens, lens), zeros(ComplexF64, lens, lens)
     for lval in solver.lvals
-        clm[lval.block...] = BlockGreenFunction(solver.gse, lval, ω)
+        clm[lval.block...] = blockGreenFunction(solver.gse, lval, ω)
         glval = copy(lval)
         glval.nambu = 2
         if lval.block[1] == lval.block[2]
-            arr = lval.block[1] .+ (solver.lens ÷ 2) 
-            cgm[arr, arr] = transpose(BlockGreenFunction(solver.gse, glval, ω))
+            arr = lval.block[1] .+ (lens ÷ 2) 
+            cgm[arr, arr] = transpose(blockGreenFunction(solver.gse, glval, ω))
         else
-            cgm[lval.block...] = BlockGreenFunction(solver.gse, glval, ω)
+            cgm[lval.block...] = blockGreenFunction(solver.gse, glval, ω)
         end
     end
     for gval in solver.gvals
-        cgm[gval.block...] = transpose(BlockGreenFunction(solver.gse, gval, ω))
+        cgm[gval.block...] = transpose(blockGreenFunction(solver.gse, gval, ω))
         lgval = copy(gval)
         lgval.nambu = 1
         if gval.block[1] == gval.block[2]
-            arr = gval.block[1] .+ (solver.lens ÷ 2)
-            clm[arr, arr] = BlockGreenFunction(solver.gse, lgval, ω)
+            arr = gval.block[1] .+ (lens ÷ 2)
+            clm[arr, arr] = blockGreenFunction(solver.gse, lgval, ω)
         else
-            clm[gval.block...] = transpose(BlockGreenFunction(solver.gse, lgval, ω))
+            clm[gval.block...] = transpose(blockGreenFunction(solver.gse, lgval, ω))
         end
     end
-    cgm[Vector(1:(solver.lens÷2)), Vector(((solver.lens÷2)+1):solver.lens)] = transpose(cgm[Vector(1:(solver.lens÷2)), Vector(((solver.lens÷2)+1):solver.lens)])
-    clm[Vector(((solver.lens÷2)+1):solver.lens), Vector(1:(solver.lens÷2))] = transpose(clm[Vector(((solver.lens÷2)+1):solver.lens), Vector(1:(solver.lens÷2))])
-    kind==:f ? cgf=clm+cgm : (kind==:b ? cgf=cgm-clm : cgf=zeros(ComplexF64, solver.lens, solver.lens))
+    cgm[Vector(1:(solver.lens÷2)), Vector(((solver.lens÷2)+1):lens)] = transpose(cgm[Vector(1:(solver.lens÷2)), Vector(((solver.lens÷2)+1):lens)])
+    clm[Vector(((solver.lens÷2)+1):lens), Vector(1:(solver.lens÷2))] = transpose(clm[Vector(((solver.lens÷2)+1):lens), Vector(1:(solver.lens÷2))])
+    kind==:f ? cgf=clm+cgm : (kind==:b ? cgf=cgm-clm : cgf=zeros(ComplexF64, lens, lens))
     return cgf
 end
 
