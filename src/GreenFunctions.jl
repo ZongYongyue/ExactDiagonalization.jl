@@ -164,13 +164,12 @@ end
 
 The exact diagonalization solver of a certain system.
 """
-struct EDSolver{R<:Real, B<:BlockVals, S<:AbstractVector{B}, I<:Integer}
+struct EDSolver{R<:Real, B<:BlockVals, S<:AbstractVector{B}}
     gse::R
     lvals::S
     gvals::S
-    lens::I
 end
-
+Base.length(eds::EDSolver) = maximum([maximum([maximum([maximum([maximum(arr) for arr in block]) for block in val.block]) for val in vals]) for vals in [eds.lvals, eds.gvals]])
 """
     EDSolver(::EDKind{:FED}, sym::Symbol, refergenerator::OperatorGenerator, bs::BinaryBases, table::Table; m::Int=200)
 
@@ -183,8 +182,7 @@ function EDSolver(::EDKind{:FED}, parts::Partition, refergenerator::OperatorGene
     gse, gs = real(vals[1]), vecs[1]
     lesser, greater = parts.lesser, parts.greater
     lvals, gvals = [BlockVals(bl, gs, rops, bs, table; m=m) for bl in lesser], [BlockVals(bg, gs, rops, bs, table; m=m) for bg in greater]
-    lens = maximum([maximum([maximum([maximum([maximum(arr) for arr in block]) for block in val.block]) for val in vals]) for vals in [lvals, gvals]])
-    return EDSolver(gse, lvals, gvals, lens)
+    return EDSolver(gse, lvals, gvals)
 end
 
 """
@@ -230,24 +228,26 @@ function ClusterGreenFunction(normal::Bool, kind::Symbol, solver::EDSolver, ω::
     return cgf
 end
 function ClusterNormalGreenFunction(kind::Symbol, solver::EDSolver, ω::Complex)
-    clm, cgm = zeros(ComplexF64, solver.lens, solver.lens), zeros(ComplexF64, solver.lens, solver.lens)
+    lens = length(solver)
+    clm, cgm = zeros(ComplexF64, lens, lens), zeros(ComplexF64, lens, lens)
     for lval in solver.lvals
         clm[lval.block...] = BlockGreenFunction(solver.gse, lval, ω)
     end
     for gval in solver.gvals
         cgm[gval.block...] = transpose(BlockGreenFunction(solver.gse, gval, ω))
     end
-    kind==:f ? cgf=clm+cgm : (kind==:b ? cgf=cgm-clm : cgf=zeros(ComplexF64, solver.lens, solver.lens))
+    kind==:f ? cgf=clm+cgm : (kind==:b ? cgf=cgm-clm : cgf=zeros(ComplexF64, lens, lens))
     return cgf
 end
 function ClusterGorkovGreenFunction(kind::Symbol, solver::EDSolver, ω::Complex)
-    clm, cgm = zeros(ComplexF64, solver.lens, solver.lens), zeros(ComplexF64, solver.lens, solver.lens)
+    lens = length(solver)
+    clm, cgm = zeros(ComplexF64, lens, lens), zeros(ComplexF64, lens, lens)
     for lval in solver.lvals
         clm[lval.block...] = BlockGreenFunction(solver.gse, lval, ω)
         glval = copy(lval)
         glval.nambu = 2
         if lval.block[1] == lval.block[2]
-            arr = lval.block[1] .+ (solver.lens ÷ 2) 
+            arr = lval.block[1] .+ (lens ÷ 2) 
             cgm[arr, arr] = transpose(BlockGreenFunction(solver.gse, glval, ω))
         else
             cgm[lval.block...] = BlockGreenFunction(solver.gse, glval, ω)
@@ -258,15 +258,15 @@ function ClusterGorkovGreenFunction(kind::Symbol, solver::EDSolver, ω::Complex)
         lgval = copy(gval)
         lgval.nambu = 1
         if gval.block[1] == gval.block[2]
-            arr = gval.block[1] .+ (solver.lens ÷ 2)
+            arr = gval.block[1] .+ (lens ÷ 2)
             clm[arr, arr] = BlockGreenFunction(solver.gse, lgval, ω)
         else
             clm[gval.block...] = transpose(BlockGreenFunction(solver.gse, lgval, ω))
         end
     end
-    cgm[Vector(1:(solver.lens÷2)), Vector(((solver.lens÷2)+1):solver.lens)] = transpose(cgm[Vector(1:(solver.lens÷2)), Vector(((solver.lens÷2)+1):solver.lens)])
-    clm[Vector(((solver.lens÷2)+1):solver.lens), Vector(1:(solver.lens÷2))] = transpose(clm[Vector(((solver.lens÷2)+1):solver.lens), Vector(1:(solver.lens÷2))])
-    kind==:f ? cgf=clm+cgm : (kind==:b ? cgf=cgm-clm : cgf=zeros(ComplexF64, solver.lens, solver.lens))
+    cgm[Vector(1:(lens÷2)), Vector(((lens÷2)+1):lens)] = transpose(cgm[Vector(1:(lens÷2)), Vector(((lens÷2)+1):lens)])
+    clm[Vector(((lens÷2)+1):lens), Vector(1:(lens÷2))] = transpose(clm[Vector(((lens÷2)+1):lens), Vector(1:(lens÷2))])
+    kind==:f ? cgf=clm+cgm : (kind==:b ? cgf=cgm-clm : cgf=zeros(ComplexF64, lens, lens))
     return cgf
 end
 
