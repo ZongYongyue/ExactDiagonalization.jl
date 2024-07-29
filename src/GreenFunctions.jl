@@ -153,7 +153,7 @@ function kryvals(H::AbstractMatrix, istates::AbstractVector, pstates::AbstractVe
         krybasis, avs[i], bvs[i], cvs[i] = genkrylov(H, istates[i], m)  
         norms[i] = norm(istates[i])
         for j in eachindex(pstates)
-            projects[i, j] = KrylovKit.project!(zeros(ComplexF64, m), krybasis, pstates[j])
+            projects[i, j] = KrylovKit.project!!(zeros(ComplexF64, m), krybasis, pstates[j])
         end
     end
     return ([avs, bvs, cvs], norms, projects)
