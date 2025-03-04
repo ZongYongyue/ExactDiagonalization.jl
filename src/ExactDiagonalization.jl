@@ -17,6 +17,6 @@ export ED, EDEigen, EDKind, EDMatrix, EDMatrixRepresentation, Sector, SectorFilt
 export BinaryBases, BinaryBasis, basistype
 
 #GreenFunctions
-export Block, Partition, BlockVals, EDSolver, BlockGreenFunction, ClusterGreenFunction
+export Block, Partition, BlockVals, GFSolver, EDSolver, FullEDSolver, FTLMSolver, BlockGreenFunction, ClusterGreenFunction
 
 end # module

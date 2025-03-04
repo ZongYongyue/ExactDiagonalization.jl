@@ -6,7 +6,7 @@ using QuantumLattices: matrix, OperatorSum, Operators, CompositeIndex, Index, Op
 using ..EDCore: Sector, EDKind
 using ..CanonicalFockSystems: BinaryBases, ⊗
 
-export Block, Partition, BlockVals, EDSolver, BlockGreenFunction, ClusterGreenFunction
+export Block, Partition, BlockVals, GFSolver, EDSolver, FullEDSolver, FTLMSolver, BlockGreenFunction, ClusterGreenFunction
 
 """
     Block{N<:Integer, T<:AbstractVector, R<:AbstractVector, P<:AbstractVector, S<:Sector}
@@ -109,8 +109,8 @@ end
 
 Generate a krylov subspace with Lanczos iteration method.
 """
-function genkrylov(matrix::AbstractMatrix, istate::AbstractVector, m::Int)
-    orth = KrylovKit.ModifiedGramSchmidt()
+function genkrylov(matrix::AbstractMatrix, istate::AbstractVector, m::Integer; reorth=false)
+    orth = reorth ? KrylovKit.ModifiedGramSchmidt2() : KrylovKit.ModifiedGramSchmidt2()
     iterator = LanczosIterator(matrix, istate, orth)
     factorization = KrylovKit.initialize(iterator)
     for _ in 1:m-1
@@ -118,9 +118,22 @@ function genkrylov(matrix::AbstractMatrix, istate::AbstractVector, m::Int)
     end
     basisvectors = basis(factorization)
     T = rayleighquotient(factorization)
-    a, c = [0.0; T.ev[1:end-1]], [T.ev[1:end-1]; 0.0]
-    return basisvectors, a, T.dv, c
+    return basisvectors, T
 end 
+
+function diagkrylov(H::AbstractMatrix, starts::AbstractVector, m::Integer; kwags...)
+    bases, tri = genkrylov(H, starts, m; kwags...)
+    ebases = Vector(undef, m)
+    tvals, tvecs = eigen(tri)
+    for k in 1:m
+            tv = tvecs[:,k]
+            ebases[k] = zeros(eltype(tv), length(bases[1]))
+        for l in 1:m
+            ebases[k] .+= tv[l]*bases[l]
+        end
+    end
+    return tvals, KrylovKit.OrthonormalBasis(ebases)
+end
 
 """
     mutable struct BlockVals{I<:Int, D<:AbstractVector, R<:AbstractVector, N<:AbstractVector, P<:AbstractMatrix}
@@ -150,7 +163,8 @@ end
 function kryvals(H::AbstractMatrix, istates::AbstractVector, pstates::AbstractVector, m::Int=200)
     avs, bvs, cvs, norms, projects = Vector{Vector{Float64}}(undef,length(istates)), Vector{Vector{Float64}}(undef,length(istates)), Vector{Vector{Float64}}(undef,length(istates)), Vector{Float64}(undef,length(istates)), Matrix{Vector{ComplexF64}}(undef,length(istates),length(istates))
     for i in eachindex(istates)
-        krybasis, avs[i], bvs[i], cvs[i] = genkrylov(H, istates[i], m)  
+        krybasis, T = genkrylov(H, istates[i], m)  
+        avs[i], bvs[i], cvs[i] = [0.0; T.ev[1:end-1]], T.dv, [T.ev[1:end-1]; 0.0]
         norms[i] = norm(istates[i])
         for j in eachindex(pstates)
             projects[i, j] = KrylovKit.project!!(zeros(ComplexF64, m), krybasis, pstates[j])
@@ -158,13 +172,13 @@ function kryvals(H::AbstractMatrix, istates::AbstractVector, pstates::AbstractVe
     end
     return ([avs, bvs, cvs], norms, projects)
 end
-
+abstract type GFSolver end
 """
     EDSolver{R<:Real, B<:BlockVals, S<:AbstractVector{B}, I<:Integer}
 
 The exact diagonalization solver of a certain system.
 """
-struct EDSolver{R<:Real, B<:BlockVals, S<:AbstractVector{B}}
+struct EDSolver{R<:Real, B<:BlockVals, S<:AbstractVector{B}} <: GFSolver
     gse::R
     lvals::S
     gvals::S
@@ -183,6 +197,164 @@ function EDSolver(::EDKind{:FED}, parts::Partition, refergenerator::OperatorGene
     lesser, greater = parts.lesser, parts.greater
     lvals, gvals = [BlockVals(bl, gs, rops, bs, table; m=m) for bl in lesser], [BlockVals(bg, gs, rops, bs, table; m=m) for bg in greater]
     return EDSolver(gse, lvals, gvals)
+end
+
+struct FullEDSolver{V<:Number, S<:Number, R<:AbstractMatrix, E<:AbstractVector{S}, F<:AbstractVector{E}, M<:AbstractVector{R}} <: GFSolver
+    T::V
+    egienvals::F
+    A::M
+    B::M
+end
+function FullEDSolver(T::Number, opr::OperatorGenerator, table::Table, bs::BinaryBases)
+    ops = expand(opr)
+    seqs = [(seq..., i) for seq in sort(collect(keys(table)), by = x -> table[x]), i in 1:2]
+    id₁, id₂ = seqs[:,1], seqs[:,2]
+    ops₁, ops₂ = [[Operators(1*CompositeIndex(Index(key[2], FID{:f}(key[3], key[1], key[4])), [0.0, 0.0], [0.0, 0.0])) for key in id] for id in [id₁, id₂]]
+    bs₁ = BinaryBases(length(table), Int(bs.quantumnumbers[1][1])-1) 
+    bs₂ = BinaryBases(length(table), Int(bs.quantumnumbers[1][1])+1)
+    opm₁, opm₂ = [matrix(op, (bs₁, bs), table) for op in ops₁], [matrix(op, (bs₂, bs), table) for op in ops₂]
+    Hₘ = matrix(ops, (bs, bs), table)
+    H₁ = matrix(ops, (bs₁, bs₁), table)
+    H₂ = matrix(ops, (bs₂, bs₂), table)
+    vals, vecs = eigen(Matrix(Hₘ))
+    vals₁, vecs₁ = eigen(Matrix(H₁))
+    vals₂, vecs₂ = eigen(Matrix(H₂))
+    A, B = [zeros(eltype(Hₘ), size(H₁, 1), size(Hₘ, 2)) for _ in 1:length(ops₁)], [zeros(eltype(Hₘ), size(H₂, 1), size(Hₘ, 2))  for _ in 1:length(ops₂)]
+    for i in 1:length(id₁)
+        for n in 1:size(Hₘ, 1)
+            for m in 1:size(H₁, 1) 
+                A[i][m, n] = dot(vecs₁[:,m], opm₁[i] * vecs[:, n]) 
+            end
+            for m in 1:size(H₂, 1)
+                B[i][m, n] = dot(vecs₂[:,m], opm₂[i] * vecs[:, n]) 
+            end
+        end
+    end
+    return FullEDSolver(T, [vals, vals₁, vals₂], A, B)
+end
+
+struct FTLMSolver <: GFSolver
+    T::Number
+    evals₁::AbstractArray
+    evals₂::AbstractArray
+    evals₃::AbstractArray
+    A₁::AbstractArray
+    A₂::AbstractArray
+end
+function FTLMSolver(T::Number, opr::OperatorGenerator, table::Table, bs::BinaryBases; m::Integer=50, nr::Integer=5, mthreads::Union{Bool, Integer}=false)
+    ops = expand(opr)
+    seqs = [(seq..., i) for seq in sort(collect(keys(table)), by = x -> table[x]), i in 1:2]
+    id₁, id₂ = seqs[:,1], seqs[:,2]
+    ops₁, ops₂ = [[Operators(1*CompositeIndex(Index(key[2], FID{:f}(key[3], key[1], key[4])), [0.0, 0.0], [0.0, 0.0])) for key in id] for id in [id₁, id₂]]
+    bs₁ = BinaryBases(length(table), Int(bs.quantumnumbers[1][1])-1) 
+    bs₂ = BinaryBases(length(table), Int(bs.quantumnumbers[1][1])+1)
+    opm₁, opm₂ = [matrix(op, (bs₁, bs), table) for op in ops₁], [matrix(op, (bs₂, bs), table) for op in ops₂]
+    Hₘ = matrix(ops, (bs, bs), table)
+    temrs = [map(x->x - 0.5, rand(Float64, size(Hₘ,1))) for _ in 1:nr]
+    rs = [temr/norm(temr) for temr in temrs]
+    evals₁ = Vector(undef, nr)
+    bases₁ = Vector(undef, nr)
+    for i in 1:nr
+        evals₁[i], bases₁[i] = diagkrylov(Hₘ, rs[i], m; reorth=true) 
+    end
+    R = [KrylovKit.project!!(zeros(ComplexF64, m), bases₁[i], rs[i]) for i in 1:nr]
+    H₁ = matrix(ops, (bs₁, bs₁), table)
+    H₂ = matrix(ops, (bs₂, bs₂), table)
+    A₁ = [[zeros(eltype(Hₘ), m, m) for _ in 1:length(id₁), _ in 1:length(id₁)] for _ in 1:nr]
+    A₂ = [[zeros(eltype(Hₘ), m, m) for _ in 1:length(id₁), _ in 1:length(id₁)] for _ in 1:nr]
+    B₁ = [Vector(undef, length(id₁)) for _ in 1:nr]
+    B₂ = [Vector(undef, length(id₁)) for _ in 1:nr]
+    evals₂ = [Vector(undef, length(id₁)) for _ in 1:nr]
+    evals₃ = [Vector(undef, length(id₁)) for _ in 1:nr]
+    bases₂ = [Vector(undef, length(id₁)) for _ in 1:nr]
+    bases₃ = [Vector(undef, length(id₁)) for _ in 1:nr]
+    if mthreads == false
+        for r in 1:nr
+            for b in 1:length(id₁)
+                evals₂[r][b], bases₂[r][b] = diagkrylov(H₁, opm₁[b]*rs[r], m; reorth=true)
+                evals₃[r][b], bases₃[r][b] = diagkrylov(H₂, opm₂[b]*rs[r], m; reorth=true)
+                B₁[r][b] = KrylovKit.project!!(zeros(ComplexF64, m), bases₂[r][b], opm₁[b]*rs[r])
+                B₂[r][b] = conj.(KrylovKit.project!!(zeros(ComplexF64, m), bases₃[r][b], opm₂[b]*rs[r]))
+            end
+        end
+    elseif mthreads == true
+        idx = Threads.Atomic{Int}(1)
+        indices = CartesianIndices((nr, length(id₁)))
+        n = length(indices)
+        Threads.@sync for _ in 1:Threads.nthreads()
+            Threads.@spawn while true
+                i = Threads.atomic_add!(idx, 1)  
+                i > n && break  
+                r, b = indices[i].I
+                evals₂[r][b], bases₂[r][b] = diagkrylov(H₁, opm₁[b]*rs[r], m; reorth=true)
+                evals₃[r][b], bases₃[r][b] = diagkrylov(H₂, opm₂[b]*rs[r], m; reorth=true)
+                B₁[r][b] = KrylovKit.project!!(zeros(ComplexF64, m), bases₂[r][b], opm₁[b]*rs[r])
+                B₂[r][b] = conj.(KrylovKit.project!!(zeros(ComplexF64, m), bases₃[r][b], opm₂[b]*rs[r]))
+            end
+        end
+    elseif isa(mthreads, Integer)
+        idx = Threads.Atomic{Int}(1)
+        indices = CartesianIndices((nr, length(id₁)))
+        n = length(indices)
+        Threads.@sync for _ in 1:mthreads
+            Threads.@spawn while true
+                i = Threads.atomic_add!(idx, 1)  
+                i > n && break  
+                r, b = indices[i].I
+                evals₂[r][b], bases₂[r][b] = diagkrylov(H₁, opm₁[b]*rs[r], m; reorth=true)
+                evals₃[r][b], bases₃[r][b] = diagkrylov(H₂, opm₂[b]*rs[r], m; reorth=true)
+                B₁[r][b] = KrylovKit.project!!(zeros(ComplexF64, m), bases₂[r][b], opm₁[b]*rs[r])
+                B₂[r][b] = conj.(KrylovKit.project!!(zeros(ComplexF64, m), bases₃[r][b], opm₂[b]*rs[r]))
+            end
+        end
+    end
+    if mthreads == false
+        for r in 1:nr
+            for a in 1:length(id₁)
+                for b in 1:length(id₁)
+                    for i in 1:m
+                        for j in 1:m
+                            A₁[r][a, b][i, j] = exp(-evals₁[r][i]/T)*B₁[r][b][j]*dot(bases₂[r][b][j],opm₁[a]*bases₁[r][i])*conj(R[r][i])
+                            A₂[r][a, b][i, j] = exp(-evals₁[r][i]/T)*B₂[r][b][j]*dot(opm₂[a]*bases₁[r][i], bases₃[r][b][j])*R[r][i]
+                        end
+                    end
+                end
+            end
+        end
+    elseif mthreads == true
+        idx = Threads.Atomic{Int}(1)
+        indices = CartesianIndices((nr, length(id₁), length(id₁), m, m))
+        n = length(indices)
+        Threads.@sync for _ in 1:Threads.nthreads()
+            Threads.@spawn while true
+                k = Threads.atomic_add!(idx, 1)  
+                k > n && break  
+                r, a, b, i, j = indices[k].I
+                A₁[r][a, b][i, j] = exp(-evals₁[r][i]/T)*B₁[r][b][j]*dot(bases₂[r][b][j],opm₁[a]*bases₁[r][i])*conj(R[r][i])
+                A₂[r][a, b][i, j] = exp(-evals₁[r][i]/T)*B₂[r][b][j]*dot(opm₂[a]*bases₁[r][i], bases₃[r][b][j])*R[r][i]
+            end
+        end
+    elseif isa(mthreads, Integer)
+        idx = Threads.Atomic{Int}(1)
+        indices = CartesianIndices((nr, length(id₁), length(id₁), m, m))
+        n = length(indices)
+        Threads.@sync for _ in 1:mthreads
+            Threads.@spawn while true
+                k = Threads.atomic_add!(idx, 1)  
+                k > n && break  
+                r, a, b, i, j = indices[k].I
+                A₁[r][a, b][i, j] = exp(-evals₁[r][i]/T)*B₁[r][b][j]*dot(bases₂[r][b][j],opm₁[a]*bases₁[r][i])*conj(R[r][i])
+                A₂[r][a, b][i, j] = exp(-evals₁[r][i]/T)*B₂[r][b][j]*dot(opm₂[a]*bases₁[r][i], bases₃[r][b][j])*R[r][i]
+            end
+        end
+    end
+    Z = 0.0
+    for r in 1:nr
+        for i in 1:m
+            Z += exp(-evals₁[r][i]/T)*abs2(R[r][i])
+        end
+    end
+    return FTLMSolver(T, evals₁, evals₂, evals₃, A₁/Z, A₂/Z)
 end
 
 """
@@ -269,6 +441,49 @@ function ClusterGorkovGreenFunction(kind::Symbol, solver::EDSolver, ω::Complex)
     kind==:f ? cgf=clm+cgm : (kind==:b ? cgf=cgm-clm : cgf=zeros(ComplexF64, lens, lens))
     return cgf
 end
+
+function ClusterGreenFunction(normal::Bool, kind::Symbol, solver::FullEDSolver, ω::Complex)
+    Z = 0.0
+    for val in solver.egienvals[1]
+        Z += exp(-val/solver.T)
+    end
+    lgm = zeros(ComplexF64, length(solver.A), length(solver.A))
+    ggm = zeros(ComplexF64, length(solver.B), length(solver.B))
+    for i in 1:length(solver.A)
+        for j in 1:length(solver.B)
+            for n in 1:length(solver.egienvals[1])
+                for m in 1:length(solver.egienvals[2])
+                    lgm[i, j] += exp(-solver.egienvals[1][n]/solver.T)*dot(conj(solver.A[j][m, n]), solver.A[i][m, n])/(ω - solver.egienvals[1][n] + solver.egienvals[2][m])
+                end
+                for m in 1:length(solver.egienvals[2])
+                    ggm[i, j] += exp(-solver.egienvals[1][n]/solver.T)*dot(conj(solver.B[i][m, n]), solver.B[j][m, n])/(ω - solver.egienvals[3][m] + solver.egienvals[1][n])
+                end
+            end
+        end
+    end
+    kind==:f ? cgf=ggm+lgm : (kind==:b ? cgf=ggm-lgm : cgf=zeros(ComplexF64, length(solver.A), length(solver.B)))
+    return cgf/Z
+end
+
+function ClusterGreenFunction(normal::Bool, kind::Symbol, solver::FTLMSolver, ω::Complex)
+    lgm = zeros(ComplexF64, length(solver.evals₂[1]), length(solver.evals₂[1]))
+    ggm = zeros(ComplexF64, length(solver.evals₃[1]), length(solver.evals₃[1]))
+    for r in 1:length(solver.evals₁)
+        for a in 1:length(solver.evals₂[1])
+            for b in 1:length(solver.evals₃[1])
+                for i in 1:length(solver.evals₂[1][1])
+                    for j in 1:length(solver.evals₃[1][1])
+                        lgm[a, b] += solver.A₁[r][a, b][i, j]/(ω - solver.evals₁[r][i] + solver.evals₂[r][b][j])
+                        ggm[a, b] += solver.A₂[r][a, b][i, j]/(ω - solver.evals₃[r][b][j] + solver.evals₁[r][i])
+                    end
+                end
+            end
+        end
+    end
+    kind==:f ? cgf=ggm+lgm : (kind==:b ? cgf=ggm-lgm : cgf=zeros(ComplexF64, length(solver.evals₂[1]), length(solver.evals₂[1])))
+    return cgf
+end
+
 
 
 end # module
